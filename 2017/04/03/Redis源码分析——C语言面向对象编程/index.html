@@ -331,6 +331,16 @@
 
           
             
+              <span class="post-comments-count">
+                <span class="post-meta-divider">|</span>
+                <span class="post-meta-item-icon">
+                  <i class="fa fa-comment-o"></i>
+                </span>
+                <a class="cloud-tie-join-count" href="/2017/04/03/Redis源码分析——C语言面向对象编程/#comments" itemprop="discussionUrl">
+                  <span class="post-comments-count join-count" itemprop="commentCount"></span>
+                </a>
+              </span>
+            
           
 
           
@@ -442,6 +452,8 @@
           
   <div class="comments" id="comments">
     
+      <div id="cloud-tie-wrapper" class="cloud-tie-wrapper"></div>
+    
   </div>
 
 
@@ -549,6 +561,7 @@
   </span>
   <span class="author" itemprop="copyrightHolder">zhenglei</span>
 </div>
+
 
 
 <div class="powered-by">
@@ -660,18 +673,21 @@
 
 
   
-
-
-
-
-
+    
+    <script>
+      var cloudTieConfig = {
+        url: document.location.href, 
+        sourceId: "",
+        productKey: "8a81861833d544aa92739e5f94cf09f9",
+        target: "cloud-tie-wrapper"
+      };
+    </script>
+    <script src="https://img1.ws.126.net/f2e/tie/yun/sdk/loader.js"></script>
   
 
 
 
 
-
-  
 
 
 
