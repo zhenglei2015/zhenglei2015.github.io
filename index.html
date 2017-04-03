@@ -355,18 +355,15 @@
 
       
         
-          
-            <p>github上找到的一个最早的版本，1.30，这个版本里面已经加入了对很多不同类型的支持，还有一个自己管理内存的 VM，不过总体说来 Redis 的代码还是非常简单易懂的，这个系列不准备一行行的分析代码，就把 Redis 实现的亮点说一下吧。今天分析第一个亮点，Redis 虽然是使用 C 写的，但是其内部的构造其实是面向对象的。<br><figure class="highlight c"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div><div class="line">3</div><div class="line">4</div><div class="line">5</div><div class="line">6</div><div class="line">7</div></pre></td><td class="code"><pre><div class="line"><span class="keyword">typedef</span> <span class="keyword">struct</span> dict &#123;</div><div class="line">    dictType *type;</div><div class="line">    <span class="keyword">void</span> *privdata;</div><div class="line">    dictht ht[<span class="number">2</span>];</div><div class="line">    <span class="keyword">int</span> rehashidx; <span class="comment">/* rehashing not in progress if rehashidx == -1 */</span></div><div class="line">    <span class="keyword">int</span> iterators; <span class="comment">/* number of iterators currently running */</span></div><div class="line">&#125; dict;</div></pre></td></tr></table></figure></p>
-<p>Redis 内部简单来说就是一个大哈希表，dict 就是装这个哈希表的地方。但是对于不同的类型的 哈希表哈希函数是不同的，key、value 的构造函数和析构函数肯定也是不一样的（Redis 支持 String、List、Set 的数据结构），但是从某个 key 找到对应值的这种哈希表的操作是相同的，如果每个类型都重新写一个哈希表的确是太烦了，这个问题使用 Java，C++ 等支持面向对象的语言很容易就解决了，比如写一个 dict 的抽象类，把 key，value的构造和析构函数以及哈希函数写成抽象接口，然后把查找这种函数利用抽象接口实现出来，然后再搞几个 StringDict子类、ListDict 子类来继承这个父类，问题就解决了。<br>但是 C 语言中没有继承和多态啊，这怎么办？<br>办法都是人想出来的，语言根本限制不了大神的发挥，大神硬生生的用 C 实现了继承和多态（这让我深刻的怀疑高级语言那些特性是来拯救世人并阻止世人做坏事的。。）。<br>有没有注意结构体里的这个指针</p>
-<pre><code>dictType *type; 
-</code></pre><p>这个指针表示的是 Dict 的类型，不像平时写代码一样 Type 用个字符串来表示，这里的 Type 是用的一个结构体来表示的。</p>
-<figure class="highlight c"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div><div class="line">3</div><div class="line">4</div><div class="line">5</div><div class="line">6</div><div class="line">7</div><div class="line">8</div></pre></td><td class="code"><pre><div class="line"><span class="keyword">typedef</span> <span class="keyword">struct</span> dictType &#123;</div><div class="line">    <span class="function"><span class="keyword">unsigned</span> <span class="title">int</span> <span class="params">(*hashFunction)</span><span class="params">(<span class="keyword">const</span> <span class="keyword">void</span> *key)</span></span>;</div><div class="line">    <span class="keyword">void</span> *(*keyDup)(<span class="keyword">void</span> *privdata, <span class="keyword">const</span> <span class="keyword">void</span> *key);</div><div class="line">    <span class="keyword">void</span> *(*valDup)(<span class="keyword">void</span> *privdata, <span class="keyword">const</span> <span class="keyword">void</span> *obj);</div><div class="line">    <span class="keyword">int</span> (*keyCompare)(<span class="keyword">void</span> *privdata, <span class="keyword">const</span> <span class="keyword">void</span> *key1, <span class="keyword">const</span> <span class="keyword">void</span> *key2);</div><div class="line">    <span class="keyword">void</span> (*keyDestructor)(<span class="keyword">void</span> *privdata, <span class="keyword">void</span> *key);</div><div class="line">    <span class="keyword">void</span> (*valDestructor)(<span class="keyword">void</span> *privdata, <span class="keyword">void</span> *obj);</div><div class="line">&#125; dictType;</div></pre></td></tr></table></figure>
-<p>上面就是这个结构体的定义，里面全部都是函数指针，对于不同类型的Dict，只需要实现不同的函数就可以了，这样并没完，使用方法在后面，来看一下大神是怎么写通用的 Find 函数的。</p>
-<figure class="highlight c"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div><div class="line">3</div><div class="line">4</div><div class="line">5</div><div class="line">6</div><div class="line">7</div><div class="line">8</div><div class="line">9</div><div class="line">10</div><div class="line">11</div><div class="line">12</div><div class="line">13</div><div class="line">14</div><div class="line">15</div><div class="line">16</div><div class="line">17</div><div class="line">18</div><div class="line">19</div><div class="line">20</div></pre></td><td class="code"><pre><div class="line"><span class="function">dictEntry *<span class="title">dictFind</span><span class="params">(dict *d, <span class="keyword">const</span> <span class="keyword">void</span> *key)</span></span></div><div class="line">&#123;</div><div class="line">    dictEntry *he;</div><div class="line">    <span class="keyword">unsigned</span> <span class="keyword">int</span> h, idx, table;</div><div class="line"></div><div class="line">    <span class="keyword">if</span> (d-&gt;ht[<span class="number">0</span>].size == <span class="number">0</span>) <span class="keyword">return</span> <span class="literal">NULL</span>; <span class="comment">/* We don't have a table at all */</span></div><div class="line">    <span class="keyword">if</span> (dictIsRehashing(d)) _dictRehashStep(d);</div><div class="line">    h = dictHashKey(d, key);<span class="comment">// 注意</span></div><div class="line">    <span class="keyword">for</span> (table = <span class="number">0</span>; table &lt;= <span class="number">1</span>; table++) &#123;</div><div class="line">        idx = h &amp; d-&gt;ht[table].sizemask;</div><div class="line">        he = d-&gt;ht[table].table[idx];</div><div class="line">        <span class="keyword">while</span>(he) &#123;</div><div class="line">            <span class="keyword">if</span> (dictCompareHashKeys(d, key, he-&gt;key))<span class="comment">// 注意</span></div><div class="line">                <span class="keyword">return</span> he;</div><div class="line">            he = he-&gt;next;</div><div class="line">        &#125;</div><div class="line">        <span class="keyword">if</span> (!dictIsRehashing(d)) <span class="keyword">return</span> <span class="literal">NULL</span>;</div><div class="line">    &#125;</div><div class="line">    <span class="keyword">return</span> <span class="literal">NULL</span>;</div><div class="line">&#125;</div></pre></td></tr></table></figure>
-<p>这个函数有几句涉及到其他系统，但是并不难理解，只要看我标注注意的两个地方就很清晰的，从字面意思上也可以看出来，先通过哈希函数把那个 key 的哈希值找到，根据哈希值找到项可能存在的桶，然后遍历桶里面的所有项，一一比较 key，如果相同的话，那么就返回结果。<br>函数里面标注的两个地方 dictHashKey 和 dictCompareHashKeys 这两个其实是宏定义（为了可读），调用刚才 dictType<br>里面的函数<br><figure class="highlight c"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div><div class="line">3</div><div class="line">4</div><div class="line">5</div></pre></td><td class="code"><pre><div class="line"><span class="meta">#<span class="meta-keyword">define</span> dictHashKey(d, key) (d)-&gt;type-&gt;hashFunction(key)</span></div><div class="line"><span class="meta">#<span class="meta-keyword">define</span> dictCompareHashKeys(d, key1, key2) \</span></div><div class="line">    (((d)-&gt;type-&gt;keyCompare) ? \</div><div class="line">        (d)-&gt;type-&gt;keyCompare((d)-&gt;privdata, key1, key2) : \</div><div class="line">        (key1) == (key2))</div></pre></td></tr></table></figure></p>
-<p>这样，对于不同的 dict，通过里面的 dictType 结构体实现了多态的功能。那些使用了 ditcType 里面的函数指针而写成的函数就是”继承”的函数们，dictType 里面的函数指针现在有个名字叫——接口，那些通用函数现在叫抽象函数。<br>第一节就到这里吧。<br>看到 Redis 里面竟然这么用 C 语言，真是惊了个呆，开始深深的怀疑各种各级语言的特性的意义，很多人喜欢语言之争，为各种写法兴奋不已，会因为一些语法糖来批判语言，这种东西以后便再也不要了，编程语言只是一种工具，附加再多的哲学也是虚妄之谈。<br>Redis 里面有很多性能优化的黑科技，但是 Redis 的精髓显然更在于对于问题的把握，什么问题是需要优化的，什么问题是不需要优化而是需要避免的。Redis 是一个非常需要效率的工具，所以使用 C 来写最有保障，因为 C 对系统的操作是相对非常底层的，虽然没有面向对象的这个特性，但是这个问题是可以克服的，也是需要被克服的。<br>Redis 里面这样对于技术的思考很多，讲体系结构的时候还要再讲这个问题。<br>Redis 真是个好东西。</p>
-
-          
+          <p>github上找到的一个最早的版本，1.30，这个版本里面已经加入了对很多不同类型的支持，还有一个自己管理内存的 VM，不过总体说来 Redis 的代码还是非常简单易懂的，这个系列不准备一行行的分析代码，就把 Redis 实现的亮点说一下吧。今天分析第一个亮点，Redis 虽然是使用 C 写的，但是其内部的构造其实是面向对象的。<br><figure class="highlight c"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div><div class="line">3</div><div class="line">4</div><div class="line">5</div><div class="line">6</div><div class="line">7</div></pre></td><td class="code"><pre><div class="line"><span class="keyword">typedef</span> <span class="keyword">struct</span> dict &#123;</div><div class="line">    dictType *type;</div><div class="line">    <span class="keyword">void</span> *privdata;</div><div class="line">    dictht ht[<span class="number">2</span>];</div><div class="line">    <span class="keyword">int</span> rehashidx; <span class="comment">/* rehashing not in progress if rehashidx == -1 */</span></div><div class="line">    <span class="keyword">int</span> iterators; <span class="comment">/* number of iterators currently running */</span></div><div class="line">&#125; dict;</div></pre></td></tr></table></figure></p>
+<p>Redis 内部简单来说就是一个大哈希表，dict 就是装这个哈希表的地方。但是对于不同的类型的 哈希表哈希函数是不同的，key、value 的构造函数和析构函数肯定也是不一样的（Redis 支持 String、List、Set 的数据结构），但是从某个 key 找到对应值的这种哈希表的操作是相同的，如果每个类型都重新写一个哈希表的确是太烦了，这个问题使用 Java，C++ 等支持面向对象的语言很容易就解决了，比如写一个 dict 的抽象类，把 key，value的构造和析构函数以及哈希函数写成抽象接口，然后把查找这种函数利用抽象接口实现出来，然后再搞几个 StringDict子类、ListDict 子类来继承这个父类，问题就解决了。<br>
+          <!--noindex-->
+          <div class="post-button text-center">
+            <a class="btn" href="/2017/04/03/Redis源码分析——C语言面向对象编程/#more" rel="contents">
+              阅读全文 &raquo;
+            </a>
+          </div>
+          <!--/noindex-->
         
       
     </div>
@@ -506,19 +503,17 @@
 
       
         
-          
-            <p>考研终于过去了，过去的几个月大概比我过去的几年都努力，最后效果也不错，总结一下各种备考的经验吧，对以后的学习还是很有帮助的。</p>
+          <p>考研终于过去了，过去的几个月大概比我过去的几年都努力，最后效果也不错，总结一下各种备考的经验吧，对以后的学习还是很有帮助的。</p>
 <h3 id="手机扔掉"><a href="#手机扔掉" class="headerlink" title="手机扔掉"></a>手机扔掉</h3><p>只有不带任何电子设备，才能好好学习，手机平板和电脑统统扔掉。</p>
 <p>带着手机的时候总是想打开来玩玩，打开刷会知乎微博什么的，半小时就没有了，而且中断了自己之前的学习状态，重新投入进去又要好一会，如果加上上厕所打水中午吃饭这种不可避免的中断，其实连续而不间断的学习时间就非常之少了。</p>
 <p>其实平板对于我考研的帮助还是蛮大的，我把平板上的所有用不到的 App 全部卸载掉了，主要留下的就是 Oplayer 这个播放器，这个播放器最好用的功能有两个，一个是 1.5 倍速看视频，一个是支持 samba，可以直接从我的小米路由器里下载文件。第一个功能可以最快速的过完课程内容，第二个功能可以简化下载的时间。另外一个作用就是学习的时候有问题可以用平板来查一下，很多攻略都是我在平板上看的。不过到了中后期平板也扔掉了，这个东西有时候也会浪费很多的时间。</p>
-<p>今后还是买一个诺基亚，上课去实验室的时候用这个功能手机。</p>
-<h3 id="反复学习"><a href="#反复学习" class="headerlink" title="反复学习"></a>反复学习</h3><p>这个方法我在之前的学习中从来没有用过，因为无论是高考还是中考，都是老师安排计划，只要跟上节奏，并不会出什么问题，而且时间很长，都是三年的准备时间，两年学习，一年复习。而考研，从零开始到最后考试只有四个半月，我的高数线代都是期末考挂科级别的水平，所以万万不能学的广泛，只抓一本辅导书，把里面的知识点反复看，题目反复做。我用的汤家凤出的三本讲义，都很薄，每一本都做了三遍，汤爷的书废话少，都是些重点的知识点，而张宇的书扩展很多，许多用不到的东西，不太适合我。尤其是汤爷的概率论讲义，网上找到的一本小册子，大概是2014概率论暑期辅导讲义，今年概率几道难题里面都有，简直拯救世界。</p>
-<p>到最后我也没有用很多材料，每科一本，英语只做了真题，政治全靠肖秀荣。</p>
-<p>事实证明，无论学啥，找到一本靠谱的教材然后猛刷三遍，最快最省时间。掌握的还牢固，毕竟教材这种东西都有一套自己的内在逻辑，比较好记。</p>
-<h3 id="单兵作战-VS-群体合作"><a href="#单兵作战-VS-群体合作" class="headerlink" title="单兵作战 VS 群体合作"></a>单兵作战 VS 群体合作</h3><p>考研从头至尾，大部分时间都是我自己在学，后来在图书馆认识了一个靠谱的小学弟，但是我们还是分开自习的，偶尔在一起互相提问一下，帮助不少，尤其是最后快要考试那几天，也学不进去了，真是四目相顾，无语泪千行，聊聊天也就过去了。小学弟最后考上了浙大，大家结果都不错。</p>
-<p>一个人学习知识是很快的，几个人一起学习效果就很一般了，但是在这种压力爆炸的时候保持一个良好的心态全靠家人和朋友的鼓励。学习上可以靠自己，心理安慰也是必不可少的呀。</p>
-
-          
+          <!--noindex-->
+          <div class="post-button text-center">
+            <a class="btn" href="/2017/04/03/考研学习的一些总结/#more" rel="contents">
+              阅读全文 &raquo;
+            </a>
+          </div>
+          <!--/noindex-->
         
       
     </div>
@@ -658,36 +653,18 @@
 
       
         
-          
-            <p>考研复试结束，找导师的时候，看到鸽子超又放了别人鸽子，在朋友圈里贩卖自己的清迈旅行，想想之后确实没什么事，于是接手了俞超的鸽子团。团里除了我还有三个人彤彤，嘉敏和向乾，我们几个人没有老司机带路，也没有做任何攻略，等到了旅行开始那天，就直接上了去清迈的飞机，开始了这场意外的旅行。</p>
+          <p>考研复试结束，找导师的时候，看到鸽子超又放了别人鸽子，在朋友圈里贩卖自己的清迈旅行，想想之后确实没什么事，于是接手了俞超的鸽子团。团里除了我还有三个人彤彤，嘉敏和向乾，我们几个人没有老司机带路，也没有做任何攻略，等到了旅行开始那天，就直接上了去清迈的飞机，开始了这场意外的旅行。</p>
 <h3 id="初到清迈"><a href="#初到清迈" class="headerlink" title="初到清迈"></a>初到清迈</h3><p>到清迈是当地九点多，时间还早，泰国走落地签的话还要 1000 泰铢的签证费，这个其实可以省下来的，国内办签证只要几块钱的样子。办理入境的人比较多，排队排了两个小时，终于入境了。</p>
 <p>接我们的导游找个这辆车真是彪，一路上开的飞快，清迈机场和市区不算太远，没一会我们就看到了两旁的市集，很像电影里面八十年代的样子，清迈的城市设计是真的耿直，就是下面这个小方块，用河围起来，横竖都是一千米。</p>
 <p><img src="http://onpy9exwk.bkt.clouddn.com/chingmai.jpeg" alt="test"></p>
-<p>到了清迈新鲜感特别足，放下行李就到处逛，旁边的建筑让我想到了很多老电影，充满了怀旧的感觉，小时候我家那个小城大概就是这个样子。清迈城里到处都是7-11，7-11大概是这里最具现代感的商店了，而且里面还可以用支付宝付款，对于没带信用卡的我来说真是一个好消息。</p>
-<p><img src="http://onpy9exwk.bkt.clouddn.com/ChiengmaiWechatIMG5.jpeg" alt="start"></p>
-<h3 id="绝望的泰餐"><a href="#绝望的泰餐" class="headerlink" title="绝望的泰餐"></a>绝望的泰餐</h3><p>早上在宾馆吃过早饭，还觉得这早饭一点特色都没有，一点也没有想到，这是我们今天吃到的最好吃的饭了。</p>
-<p>那天早上我们去了清迈的 MAYA 买买买，在泰国的街头，随处可见的是大象和佛的塑像，本来以为泰国的物价会比国内便宜很多，但是 MAYA 里面的商店却让我大跌眼镜，阿迪这种牌子到是有，但是价格和国内基本一致，瞬间打消了买买买的欲望。不过泰国的化妆品店和药店让两个妹子兴奋不已，买三送一买三送一。。。根本停不下来。</p>
-<p><img src="http://onpy9exwk.bkt.clouddn.com/ChiengmaiWechatIMG6.jpeg" alt="ele"></p>
-<p>到了中午，我们直接打开点评找附近的五星饭店，不过这次点评让我们失望了，估计店家是用水军刷的五星，我们在曼宁路找了半天，终于找到这家小馆子，按照菜单点了一下，吃了几口便没了胃口，我们互相安慰，一定是我们不太适合吃泰国菜。老板娘倒是特别热情，用特别不熟练的英语和汉语尝试和我们说话，不停的说两个妹子——“水晶晶，水晶晶”，后来才知道，这是夸妹子长得漂亮的意思。</p>
-<p>午饭我们都没有吃多少，出了小店，我们开始计划下午的事情，由于天气实在太热，我们决定直接去马杀鸡。泰国的女子监狱马杀鸡好像挺有名气，里面提供服务的技师都是女子监狱刑满释放的犯人。我们找了个分店来体验一下。做马杀鸡的时候，其实刚开始我是拒绝的，按的我全身都疼，不过后面竟然感觉特别舒服，就这样按了我两个小时。泰国物价真是便宜，这个马杀鸡才花了 100 块。</p>
-<p>出了门就开始找晚饭，我们也是听说了泰国有名的芒果饭和榴莲饭，决定去体验一下，又是点评了一家小馆子，这家小馆子给了我们全程最难以忘记的饮食体验。</p>
-<p><img src="http://onpy9exwk.bkt.clouddn.com/ChiengmaiWechatIMG8.jpeg" alt="mango"></p>
-<p>快餐盒！塑料纸！上面是一层饭！大家吃了两口就放弃了。开始怀念起吃早饭的时光。</p>
-<p>由于是周日，晚上有有名的周日集市，我们就赶回了塔佩门，这个集市还是很热闹的，就是蚊子有点多，集市横穿整个清迈，一眼望不到头，里面卖什么的都有，有水果衣服明信片还有各种饮料，为了猎奇我买了一瓶名叫亚洲菜水的饮料，一口下去，简直像打开了新世界，那个味道就是感觉就像直接嚼白菜，这一天的饮食让我对泰国菜充满了恐惧。</p>
-<p><img src="http://onpy9exwk.bkt.clouddn.com/ChiengmaiWechatIMG9.jpeg" alt="meizi"><br><img src="http://onpy9exwk.bkt.clouddn.com/ChiengmaiWechatIMG10.jpeg" alt="peoplemoutainpeoplesea"></p>
-<p>第一天的行程就在不停的吃与不停的绝望中结束了。</p>
-<h3 id="寺庙、皇宫与大学"><a href="#寺庙、皇宫与大学" class="headerlink" title="寺庙、皇宫与大学"></a>寺庙、皇宫与大学</h3><p>第二天早上我们在吃早饭的时候特别满足，吃的饱饱的，其实是怕了泰国菜了，不过这天的经历让我们知道了，其实是第一天走错了地方，这天的饭都挺好吃的。</p>
-<p>早上我们去了清迈有名的双龙寺，叫了辆双排车，不得不说清迈的旅游交通还是非常方便和廉价的，城内 20 泰铢一个人城外也不贵。上双龙寺的山路比较弯，路上向乾被晃晕了车，双龙寺其实并不高，爬了几步路就到了顶，寺里面金碧辉煌，风一吹风铃的声音特别好听。<br><img src="http://onpy9exwk.bkt.clouddn.com/ChiengmaiWechatIMG12.jpeg" alt="shuanglong"></p>
-<p>出来双龙寺，我们坐车去了蒲屏皇宫，这个皇宫是泰北皇宫，每年 1-3 月有皇室在这里住，皇宫对着装要求还蛮严格，短裤和无袖衫是不能穿的，在门口有专门的衣服提供，皇宫大概是清迈最整洁的地方了，看得出来这里的花花草草都是经过精心布置的。<br><img src="http://onpy9exwk.bkt.clouddn.com/ChiengmaiWechatIMG17.jpeg" alt="plant"></p>
-<p>值得一提的是，清迈大学的简称竟然是 CMU，和计算机圣地 CMU 一样，实在是惊喜，而且清迈大学里面的咖啡馆用的是农学院自己种的咖啡，非常好喝。</p>
-<p><img src="http://onpy9exwk.bkt.clouddn.com/ChiengmaiWechatIMG20.jpeg" alt="collage"></p>
-<h3 id="去拜县的792个弯"><a href="#去拜县的792个弯" class="headerlink" title="去拜县的792个弯"></a>去拜县的792个弯</h3><p>第三天的时候我们要去拜县，听说这是一个非常文艺小清新的地方，我们都充满了期待，然而这天让我们印象最深刻的不是拜县有多么的文艺，而是去拜县的山路，导游告诉我们去拜县要经过 792 个弯，我们都感到非常的惊悚。据说有人在去拜县的路上吐了十几次，感谢晕车药，我们都挺住了。</p>
-<p><img src="http://onpy9exwk.bkt.clouddn.com/ChiengmaiWechatIMG18.jpeg" alt="road"></p>
-<p>到了拜县其实还好，拜县是一个松散的地方，每隔一段路就有一个景点，大家打起精神来又拍了许多照片。。。</p>
-<p><img src="http://onpy9exwk.bkt.clouddn.com/ChiengmaiWechatIMG19.jpeg" alt="bai"></p>
-<h3 id="小城故事"><a href="#小城故事" class="headerlink" title="小城故事"></a>小城故事</h3><p>清迈是邓丽君很喜欢的一个城市，小城故事多唱的就是这里，后来在这里香消玉殒，也是令人感慨。后面我们还去了很多地方，比如清迈的 LANNA 民俗博物馆之类的，这个 LANNA 很奇怪，在很多地方都有出现，为什么这些商店不叫清迈XXX呢，我以为 LANNA 是当地一个土豪之类的，查了一下才知道，这个清迈原来并不是泰国的，是一个叫兰纳的国家的首都，曾经非常强大，后来某任国王的 6 个儿子争皇位，打打杀杀的把这个国家给搞没掉了，不停的寻求泰国的庇护而后便和平的成为了泰国的一部分。所以保留了 LANNA 这个称呼，也是挺有意思的。</p>
-
-          
+<p>到了清迈新鲜感特别足，放下行李就到处逛，旁边的建筑让我想到了很多老电影，充满了怀旧的感觉，小时候我家那个小城大概就是这个样子。清迈城里到处都是7-11，7-11大概是这里最具现代感的商店了，而且里面还可以用支付宝付款，对于没带信用卡的我来说真是一个好消息。<br>
+          <!--noindex-->
+          <div class="post-button text-center">
+            <a class="btn" href="/2017/04/01/清迈的意外之旅/#more" rel="contents">
+              阅读全文 &raquo;
+            </a>
+          </div>
+          <!--/noindex-->
         
       
     </div>
